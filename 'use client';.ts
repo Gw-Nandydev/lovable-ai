@@ -1,0 +1,1002 @@
+'use client';
+import { useState, useEffect, useRef, Fragment } from 'react';
+import { useParams } from 'next/navigation';
+import ReactMarkdown from 'react-markdown';
+import {
+  Globe, ChevronRight, Copy, Code as CodeIcon, MonitorSmartphone, Loader2,
+  FolderTree, ChevronDown, File, Code2 , Zap, Github, Folder, FolderOpen, ChevronRight as ArrowRight, Search, X, FileIcon, CheckCircle, Bookmark, Settings
+} from 'lucide-react';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+const USER_ID = 'demo-user-001', BRAND = 'GravityDoc', LOGO = '/gravitywrite.svg';
+const hhmm = (d) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const lastFile = (t) => [...t.matchAll(/<lov-write\s+file_path="([^"]+)">/gi)].pop()?.[1] ?? null;
+const closedFiles = (t) => Object.fromEntries([...t.matchAll(/<lov-write\s+file_path="([^"]+)">([\s\S]*?)<\/lov-write>/gi)].map(m => [m[1], m[2].trim()]));
+const liveFiles = (t) => Object.fromEntries([...t.matchAll(/<lov-write\s+file_path="([^"]+)">([\s\S]*?)(?=<\/lov-write>|<lov-write|$)/gi)].map(m => [m[1], m[2]]));
+const previewUrl = (t) => t.match(/Preview ready:\s*(https?:\/\/\S+)/i)?.[1] ?? null;
+const scrub = (t) => {
+  const withoutLovCodeBlock = t.replace(/<lov-code>[\s\S]*?<\/lov-code>/gi, '');
+  let withoutOpenTags = withoutLovCodeBlock.replace(/<lov-code>[\s\S]*$/gi, '');
+  withoutOpenTags = withoutOpenTags
+    .replace(/\s+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\s+|\s+$/g, '')
+    .replace(/(\n[-*] .+?)\n(?!\n|[-*])/g, '$1\n\n');
+  return withoutOpenTags.trim();
+};
+const langFromPath = (p:string) => ({ tsx: 'typescript', ts: 'typescript', js: 'javascript', jsx: 'javascript', css: 'css', scss: 'css', json: 'json', html: 'html', md: 'markdown', mdx: 'markdown' }[p.split('.').pop()?.toLowerCase()] ?? 'tsx');
+export default function StreamChat() {
+  const { uuid } = useParams();
+  const [published, setPublished] = useState(false);
+  const [log, setLog] = useState([]), [draft, setDraft] = useState(null), [files, setFiles] = useState({}), [order, setOrder] = useState([]);
+  const [last, setLast] = useState(null), [view, setView] = useState('preview'), [explorer, setExplorer] = useState(false);
+  const [selected, setSelected] = useState(null), [preview, setPreview] = useState(null), [streaming, setStreaming] = useState(false);
+  const [openTabs, setOpenTabs] = useState([]);
+  const [inp, setInp] = useState('');
+  const dingRef  = useRef<HTMLElement | null>(null), endRef = useRef(null);
+  const scroll = () => setTimeout(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), 10);
+  const push = (m) => setLog(p => [...p, m]);
+  const [extTree, setExtTree] = useState(null); 
+  const [loadingTree, setLoadingTree] = useState(false);
+  useEffect(() => {
+    if (!uuid) return;
+    const cached = sessionStorage.getItem(`prompt-${uuid}`);
+    if (cached) {
+      sessionStorage.removeItem(`prompt-${uuid}`);
+      push({ role: 'user', content: cached, at: new Date() });
+      start(cached);
+    }
+  }, [uuid]);
+  useEffect(() => {
+    if (!preview) return;
+    if (!dingRef.current) dingRef.current = new Audio('/sound.mp3');
+  
+    dingRef.current.play().then(() => {
+      console.log("audio played ✅");
+    }).catch((err) => {
+      console.warn("Audio failed to play:", err);
+    });
+    setView('preview');
+  }, [preview]);
+  useEffect(() => {
+    if (selected && !openTabs.includes(selected)) {
+      setOpenTabs((prev) => [...prev, selected]);
+    }
+  }, [selected]);
+  // 1️⃣ Load & re-hydrate state (including converting saved date strings back to Date objects)
+  useEffect(() => {
+    if (!uuid) return;
+    console.log("here come if" , uuid);
+    const saved = sessionStorage.getItem(`chatState-${uuid}`);
+    const localPrompt = localStorage.getItem(`userPrompt-${uuid}`);
+    console.log("local and session items" , saved , localPrompt ) ;
+    if (!saved) return;
+    try {
+      const {
+        log: rawLog,
+        files,
+        order,
+        last,
+        preview,
+        openTabs,
+        selected,
+        view,
+        explorer,
+        published
+      } = JSON.parse(saved);
+  
+      let hydratedLog = Array.isArray(rawLog)
+      ? rawLog.map(msg => ({
+          ...msg,
+          at: new Date(msg.at)
+        }))
+      : [];
+      // 👇 If log is empty but user prompt exists, prepend it
+      if (hydratedLog.length === 0 && localPrompt) {
+        hydratedLog = [{ role: 'user', content: localPrompt, at: new Date() }];
+      }
+      setLog(hydratedLog);
+      setFiles(files);
+      setOrder(order);
+      setLast(last);
+      setPreview(preview);
+      setOpenTabs(openTabs);
+      setSelected(selected);
+      setView(view);
+      setExplorer(explorer);
+      setPublished(published);
+    } catch (err) {
+      console.error('Failed to parse saved chat state:', err);
+    }
+  }, [uuid]);
+  // 2️⃣ Save state on every change
+  useEffect(() => {
+    if (!uuid) return;
+    const state = { log, files, order, last, preview, openTabs, selected, view, explorer, published };
+    sessionStorage.setItem(`chatState-${uuid}`, JSON.stringify(state));
+  }, [
+    uuid,
+    log,
+    files,
+    order,
+    last,
+    preview,
+    openTabs,
+    selected,
+    view,
+    explorer,
+    published
+  ]);
+
+  const start = async (prompt) => {
+    // sessionStorage.removeItem(`chatState-${uuid}`);
+    setStreaming(true); setDraft(''); setFiles({}); setOrder([]); setLast(null); setPreview(null); setView('preview'); setExplorer(false); setOpenTabs([]);
+    const res = await fetch('/api/stream', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: USER_ID, uuid, messages: [{ role: 'user', content: prompt }] })
+    });
+    if (!res.body) return finish('');
+    const rd = res.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await rd.read();
+      if (done) break;
+      buf += dec.decode(value);
+      setDraft(scrub(buf));
+      const lf = lastFile(buf); if (lf) { setLast(lf); setSelected(s => s ?? lf); }
+      const live = liveFiles(buf);
+      if (Object.keys(live).length) {
+        setFiles(p => ({ ...p, ...live }));
+        setOrder(o => [...o, ...Object.keys(live)].filter((v, i, a) => a.indexOf(v) === i));
+      }
+      const p = previewUrl(buf); if (p) setPreview(p);
+    }
+    finish(scrub(buf));
+  };
+  const prepareAudio = () => {
+    if (!dingRef.current) {
+      dingRef.current = new Audio('/sound.mp3');
+      dingRef.current.load(); // Preload
+    }
+  };
+  const finish = (txt) => {
+    if (txt) {
+      push({
+        role: 'ai',
+        content: scrub(txt),
+        at: new Date(),
+        file: lastFile(txt),
+        preview: previewUrl(txt),
+      });
+    }
+    setDraft(null);
+    setStreaming(false);
+    scroll();
+  };
+  
+  const send = (e) => {
+    e.preventDefault();
+    const v = inp.trim();
+    console.log(v);
+    if (!v) return;
+    prepareAudio(); // Preload on user action ✅
+    setInp('');
+    push({ role: 'user', content: v, at: new Date() });
+    scroll();
+    start(v);
+  };
+  const closeTab = (path) => {
+    setOpenTabs(tabs => tabs.filter(t => t !== path));
+    if (selected === path) setSelected(openTabs.find(t => t !== path) || null);
+  };
+  return (
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-black text-white">
+   {/* Chat header */}
+  <div className="sticky top-0 z-10 flex items-center justify-between h-10 bg-[#0a0a0a] border-b border-white/20 px-4">
+    <div className="flex items-center gap-2">
+      <img src={LOGO} alt={BRAND} className="h-5 w-5" />
+      <span className="text-sm font-semibold text-white">Chat with {BRAND}</span>
+    </div>
+    <div className="flex items-center gap-2">
+      <button className="p-1 rounded hover:bg-white/10 transition">
+        <Search className="h-4 w-4 text-white/50" />
+      </button>
+      <button className="p-1 rounded hover:bg-white/10 transition">
+        <Settings className="h-4 w-4 text-white/50" />
+      </button>
+    </div>
+  </div>
+      <main className="flex flex-1 overflow-hidden">
+      <aside className="flex flex-col w-[500px] bg-[#111] border-r border-white/10">
+
+          <div className="flex-1 overflow-y-auto px-4 py-4">
+            {[...log, ...(draft ? [{ role: 'ai', content: draft, at: new Date() }] : [])].map((m, i, a) => (
+              <div key={i} className="mb-3">
+              {m.role === 'ai' && (
+                <div className="mb-1 flex items-center space-x-2 text-[10px]">
+                  {/* AI Avatar */}
+                  <img src={LOGO} alt={BRAND} className="h-4 w-4 rounded-full" />
+                  {/* Badge */}
+                  <span className="rounded-full bg-white/10 px-2 py-0.5 text-white/80 font-medium">
+                    {BRAND}
+                  </span>
+                  {/* Separator Dot */}
+                  <span className="text-white/50">•</span>
+                  {/* Timestamp */}
+                  <span className="text-white/50">{hhmm(m.at)}</span>
+                </div>
+              )}
+                <div className={`max-w-[90%] whitespace-pre-wrap rounded-lg px-3 py-2 text-[13px] leading-[1.5] ${m.role === 'user' ? 'ml-auto bg-white/10 text-gray-200' : 'mr-auto bg-white/5'}`}>
+                  {m.role === 'user' ? m.content : 
+                 <ReactMarkdown
+                 components={{
+                   p: ({ children, node }) => {
+                     const isInsideList = node?.parent?.type === 'listItem';
+                     const isAfterList = node?.position?.start?.line !== node?.position?.end?.line;
+                     return (
+                       <p
+                         className={`${
+                           isInsideList ? '' : 'mt-2'
+                         } mb-[6px] text-[13px] leading-[1.6] text-white/90`}
+                       >
+                         {children}
+                       </p>
+                     );
+                   },
+                   li: ({ children }) => (
+                     <li className="text-white/90 leading-[1.6]">{children}</li>
+                   ),
+                   ul: ({ children }) => (
+                     <ul className="list-disc pl-4 mb-1 space-y-[2px]">{children}</ul>
+                   ),
+                   ol: ({ children }) => (
+                     <ol className="list-decimal pl-4 mb-1 space-y-[2px]">{children}</ol>
+                   ),
+                   strong: ({ children }) => (
+                     <strong className="font-semibold text-white">{children}</strong>
+                   ),
+                   code: ({ children }) => (
+                     <code className="bg-white/10 px-1 py-0.5 rounded text-[12px] font-mono">{children}</code>
+                   ),
+                   a: ({ href, children }) => (
+                     <a
+                       href={href}
+                       target="_blank"
+                       rel="noreferrer"
+                       className="text-blue-400 underline"
+                     >
+                       {children}
+                     </a>
+                   ),
+                 }}
+               >
+                 {m.content}
+               </ReactMarkdown>        
+               }
+                </div>
+                {m.role === 'ai' && i === a.length - 1 && last && <Card file={last} preview={preview} onPreview={() => { setView('preview'); setExplorer(false); }} onCode={() => setView('code')} />}
+              </div>
+            ))}
+            <div ref={endRef} />
+          </div>
+          <form
+            onSubmit={send}
+            className="flex items-center gap-2 border-t border-white/10 bg-[#0a0a0a] px-4 py-3"
+          >
+            <textarea
+              rows={1}
+              value={inp}
+              onChange={e => setInp(e.target.value)}
+              className="flex-1 resize-none rounded bg-[#1a1a1a] px-3 py-2 text-[13px] placeholder-white/30 focus:ring-2 focus:ring-blue-500 outline-none transition"
+              placeholder="Type a message…"
+            />
+            <button
+              disabled={streaming}
+              className="flex h-8 w-8 items-center justify-center rounded bg-blue-600 hover:bg-blue-700 transition"
+            >
+              {streaming
+                ? <Loader2 className="h-4 w-4 animate-spin text-white" />
+                : <span className="text-white">➤</span>
+              }
+            </button>
+          </form>
+        </aside>
+        <section className="flex flex-1 flex-col overflow-hidden">
+        <Header
+          ready={view === 'preview' ? !!preview : order.length > 0}
+          view={view}
+          explorer={explorer}
+          toggle={() => setExplorer(e => !e)}
+          preview={preview}
+          published={published}
+          setPublished={setPublished}
+        />
+
+          {view === 'preview' ? (preview ? <iframe src={preview} className="flex-1 border-none" /> : <SpinningPreview />) : explorer ? (
+            <div className="flex flex-1 overflow-hidden">
+            <Explorer
+              files={files}
+              order={order}
+              sel={selected}
+              setSel={setSelected}
+              extTree={extTree}
+              setExtTree={setExtTree}
+              setFiles={setFiles}
+              explorer={explorer}
+              uuid={uuid}
+              USER_ID={USER_ID}
+            />
+              <div className="flex-1 overflow-y-auto">
+                {openTabs.length > 0 && <Tabs tabs={openTabs} selected={selected} setSelected={setSelected} closeTab={closeTab} />}
+                {selected && (
+                  <SyntaxHighlighter
+                    language={langFromPath(selected)}
+                    style={vscDarkPlus}
+                    customStyle={{
+                      margin: 0,
+                      padding: '10px 24px',
+                      background: 'transparent',
+                      fontSize: '12px',
+                      lineHeight: '1.5',
+                      whiteSpace: 'pre',
+                    }}
+                    codeTagProps={{ style: { fontSize: '12px', whiteSpace: 'pre' } }}
+                    showLineNumbers
+                    wrapLines={false}
+                    wrapLongLines={false}
+                  >
+                    {files[selected]?.replace(/\r\n/g, '\n').replace(/^\n+/, '')}
+                  </SyntaxHighlighter>
+                )}
+              </div>
+            </div>
+          ) : <Stack
+          files={files}
+          order={order}
+          onExit={() => setView('preview')}
+          onRaw={() => {/* raw view logic */}}
+          onDiff={() => {/* diff view logic */}}
+        />}
+        </section>
+      </main>
+    </div>
+  );
+}
+const features = [
+  'Collaborate seamlessly with your team',
+  'Deploy when your code is ready',
+  'Edit and iterate live in the browser',
+  'Preview changes instantly',
+  'Chat with AI in the sidebar',
+];
+function SpinningPreview() {
+  const listRef = useRef<HTMLUListElement>(null);
+  useEffect(() => {
+    // apply staggered delays for pulsing effect
+    const items = listRef.current?.children || [];
+    Array.from(items).forEach((el, i) => {
+      (el as HTMLElement).style.animationDelay = `${i * 1.2}s`;
+      (el as HTMLElement).style.animationDuration = '1s';
+      (el as HTMLElement).style.animationIterationCount = 'infinite';
+    });
+  }, []);
+  return (
+    <div className="flex flex-1 items-center justify-center bg-[#0a0a0a] p-6">
+      {/* Gradient border card with hover scale */}
+      <div className="rounded-xl bg-gradient-to-tr from-blue-600 via-purple-600 to-pink-600 p-[2px] shadow-lg transform hover:scale-105 transition-transform duration-300">
+        <div className="bg-[#111] rounded-lg p-6 text-center">
+          {/* Spinner with ping effect on hover */}
+          <div className="flex justify-center mb-4">
+          <svg xmlns="http://www.w3.org/2000/svg" width="45" height="45" viewBox="0 0 24 24"><rect width="10" height="10" x="1" y="1" fill="currentColor" rx="1"><animate id="svgSpinnersBlocksShuffle30" fill="freeze" attributeName="x" begin="0;svgSpinnersBlocksShuffle3b.end" dur="0.2s" values="1;13"/><animate id="svgSpinnersBlocksShuffle31" fill="freeze" attributeName="y" begin="svgSpinnersBlocksShuffle38.end" dur="0.2s" values="1;13"/><animate id="svgSpinnersBlocksShuffle32" fill="freeze" attributeName="x" begin="svgSpinnersBlocksShuffle39.end" dur="0.2s" values="13;1"/><animate id="svgSpinnersBlocksShuffle33" fill="freeze" attributeName="y" begin="svgSpinnersBlocksShuffle3a.end" dur="0.2s" values="13;1"/></rect><rect width="10" height="10" x="1" y="13" fill="currentColor" rx="1"><animate id="svgSpinnersBlocksShuffle34" fill="freeze" attributeName="y" begin="svgSpinnersBlocksShuffle30.end" dur="0.2s" values="13;1"/><animate id="svgSpinnersBlocksShuffle35" fill="freeze" attributeName="x" begin="svgSpinnersBlocksShuffle31.end" dur="0.2s" values="1;13"/><animate id="svgSpinnersBlocksShuffle36" fill="freeze" attributeName="y" begin="svgSpinnersBlocksShuffle32.end" dur="0.2s" values="1;13"/><animate id="svgSpinnersBlocksShuffle37" fill="freeze" attributeName="x" begin="svgSpinnersBlocksShuffle33.end" dur="0.2s" values="13;1"/></rect><rect width="10" height="10" x="13" y="13" fill="currentColor" rx="1"><animate id="svgSpinnersBlocksShuffle38" fill="freeze" attributeName="x" begin="svgSpinnersBlocksShuffle34.end" dur="0.2s" values="13;1"/><animate id="svgSpinnersBlocksShuffle39" fill="freeze" attributeName="y" begin="svgSpinnersBlocksShuffle35.end" dur="0.2s" values="13;1"/><animate id="svgSpinnersBlocksShuffle3a" fill="freeze" attributeName="x" begin="svgSpinnersBlocksShuffle36.end" dur="0.2s" values="1;13"/><animate id="svgSpinnersBlocksShuffle3b" fill="freeze" attributeName="y" begin="svgSpinnersBlocksShuffle37.end" dur="0.2s" values="1;13"/></rect></svg>
+          </div>
+          {/* Title */}
+          <p className="text-lg font-semibold text-white mb-4">Spinning up preview…</p>
+
+          {/* Feature list with pulsing animation */}
+          <ul ref={listRef} className="space-y-2 text-sm text-white/60 text-left">
+            {features.map((point, i) => (
+              <li key={i} className="animate-pulse-once flex items-start">
+                <span className="mr-2 text-blue-500">•</span>
+                <span>{point}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+const Tabs = ({ tabs, selected, setSelected, closeTab }) => {
+  return (
+    <div className="flex h-9 items-center gap-1 border-b border-white/10 bg-[#0f0f0f] px-3 py-1 text-[11px]">
+      {tabs.map((tab) => (
+        <div
+          key={tab}
+          className={`flex items-center gap-1 rounded px-2 py-1 cursor-pointer ${selected === tab ? 'bg-[#1e1e1e] text-blue-300' : 'hover:bg-[#1e1e1e] text-white/70'}`}
+          onClick={() => setSelected(tab)}
+        >
+          {tab.split('/').pop()}
+          <X size={12} className="ml-1" onClick={(e) => { e.stopPropagation(); closeTab(tab); }} />
+        </div>
+      ))}
+    </div>
+  );
+};
+interface HeaderProps {
+  ready: boolean;
+  view: 'preview' | 'code';
+  explorer: boolean;
+  toggle: () => void;
+  preview: string | null;
+  published: boolean;
+  setPublished: (p: boolean) => void;
+}
+const Header: React.FC<HeaderProps> = ({
+  ready,
+  view,
+  explorer,
+  toggle,
+  preview,
+  published,
+  setPublished,
+}) => {
+  const [showPublish, setShowPublish] = useState(false);
+  const [showGitHub, setShowGitHub] = useState(false);
+  const [showSupabase, setShowSupabase] = useState(false);
+  const [showInvite, setShowInvite] = useState(false);
+
+  const publishRef = useRef<HTMLDivElement>(null);
+  const githubRef = useRef<HTMLDivElement>(null);
+  const supabaseRef = useRef<HTMLDivElement>(null);
+  const inviteRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (publishRef.current && !publishRef.current.contains(e.target as Node)) setShowPublish(false);
+      if (githubRef.current && !githubRef.current.contains(e.target as Node)) setShowGitHub(false);
+      if (supabaseRef.current && !supabaseRef.current.contains(e.target as Node)) setShowSupabase(false);
+      if (inviteRef.current && !inviteRef.current.contains(e.target as Node)) setShowInvite(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+  return (
+    <div className="flex h-10 items-center justify-between border-b border-white/10 bg-[#0c0c0c] px-4 text-sm">
+      {/* Left section */}
+      <div className="flex items-center space-x-3">
+        {ready ? (
+          <span className="text-green-400 text-lg">●</span>
+        ) : (
+          <Loader2 className="h-4 w-4 animate-spin text-white/70" />
+        )}
+        <MonitorSmartphone size={18} className="text-white/80" />
+        <span className="font-medium text-white/90">
+          {view === 'preview' ? 'Home' : 'Code'}
+        </span>
+      </div>
+      {/* Right toolbar */}
+      <div className="flex items-center space-x-2">
+        <button
+          onClick={toggle}
+          title="Toggle Code Viewer"
+          className={`p-2 rounded-md transition ${
+            explorer
+              ? 'bg-blue-600 text-white shadow'
+              : 'bg-[#111] hover:bg-[#222] text-white/70'
+          }`}
+        >
+          <Code2 size={18} />
+        </button>
+        {/* Supabase dropdown */}
+        <div className="relative" ref={supabaseRef}>
+          <button
+            onClick={() => setShowSupabase(v => !v)}
+            className="p-2 rounded-md bg-[#111] hover:bg-[#222] transition"
+          >
+            <Zap size={18} className="text-green-400" />
+          </button>
+          {showSupabase && (
+            <div className="absolute right-0 mt-2 w-64 rounded bg-[#1a1a1a] border border-white/10 p-4 text-xs shadow-lg">
+              <h3 className="mb-2 font-semibold text-white">Supabase</h3>
+              <p className="text-white/60 mb-3 leading-snug">
+                Integrate user authentication,<br /> data storage, and backend capabilities.
+              </p>
+              <a
+                href="https://supabase.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 rounded-md border border-white/10 bg-white text-black px-3 py-1 text-xs font-medium hover:bg-gray-100 transition"
+              >
+                <Zap size={12} className="text-green-500" /> Connect Supabase
+              </a>
+            </div>
+          )}
+        </div>
+        {/* GitHub dropdown */}
+        <div className="relative" ref={githubRef}>
+          <button
+            onClick={() => setShowGitHub(v => !v)}
+            className="p-2 rounded-md bg-[#111] hover:bg-[#222] transition"
+          >
+            <Github size={18} className="text-white/70" />
+          </button>
+          {showGitHub && (
+            <div className="absolute right-0 mt-2 w-64 rounded bg-[#1a1a1a] border border-white/10 p-4 text-xs shadow-lg">
+              <h3 className="mb-2 font-semibold text-white">GitHub</h3>
+              <p className="text-white/60 mb-3">
+                Sync your project 2-way with GitHub to collaborate at source.
+              </p>
+              <a
+                href="https://github.com/login/oauth/authorize?client_id=YOUR_CLIENT_ID"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 rounded-md border border-white/10 bg-white text-black px-3 py-1 text-xs font-medium hover:bg-gray-100 transition"
+              >
+                <Github size={12} /> Connect GitHub
+              </a>
+            </div>
+          )}
+        </div>
+        {/* Invite dropdown */}
+        <div className="relative" ref={inviteRef}>
+          <button
+            onClick={() => setShowInvite(v => !v)}
+            className="px-3 py-1 rounded-md bg-[#111] hover:bg-[#222] border border-white/20 text-white text-sm transition"
+          >
+            Invite
+          </button>
+          {showInvite && (
+            <div className="absolute right-0 mt-2 w-72 rounded bg-[#1a1a1a] border border-white/10 p-4 text-xs shadow-lg">
+              <h3 className="mb-1 font-semibold text-white">Invite</h3>
+              <p className="text-white/60 text-[11px] mb-3">
+                Collaborate on this project, sharing credits.{' '}
+                <a href="#" className="text-blue-400 underline">Upgrade your plan</a> for more permissions handling.
+              </p>
+              <div className="flex items-center mb-3">
+                <input
+                  type="email"
+                  placeholder="Invite by email"
+                  className="flex-1 rounded bg-[#111] border border-white/10 px-2 py-[5px] text-[11px] text-white placeholder-white/30 outline-none"
+                />
+                <button className="ml-2 rounded bg-white/10 px-2 py-[5px] text-[11px] text-white hover:bg-white/20">Invite</button>
+              </div>
+              <div className="border-t border-white/10 pt-2 text-white/80">
+                <div className="flex items-center gap-2">
+                  <div className="h-6 w-6 rounded-full bg-orange-500 text-xs flex items-center justify-center font-bold">N</div>
+                  <div className="flex flex-col text-xs">
+                    <span>naganandhini3012@gmail.com <span className="text-white/40">(you)</span></span>
+                    <span className="text-white/40 text-[10px]">Owner</span>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 flex items-center justify-between">
+                <span className="text-white/50 text-[11px]">Upgrade to collaborate</span>
+                <button className="text-white text-[11px] px-3 py-[5px] rounded bg-white/10 hover:bg-white/20">Upgrade</button>
+              </div>
+            </div>
+          )}
+        </div>
+        {/* Publish dropdown */}
+        <div className="relative" ref={publishRef}>
+          <button
+            onClick={() => setShowPublish(v => !v)}
+            className="px-3 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm transition"
+          >
+            Publish
+          </button>
+          {showPublish && (
+            <div className="absolute right-0 mt-2 w-64 rounded bg-[#1a1a1a] border border-white/10 p-4 text-xs shadow-lg">
+              <h3 className="mb-2 font-semibold text-white">Publish</h3>
+              <p className="text-white/60 mb-2">
+                Publish your project to make it visible for others on the internet.
+              </p>
+              {preview ? (
+                <>
+                  <div className="flex items-center gap-1 text-white text-[12px] mb-1">
+                    <Globe size={12} className="text-white/40" />
+                    <span className="truncate">{preview}</span>
+                  </div>
+                  <div className="text-blue-400 text-[11px] cursor-pointer hover:underline mb-3">+ Custom domains</div>
+                </>
+              ) : (
+                <div className="text-white/30 italic mb-2">No preview URL generated yet.</div>
+              )}
+              <div className="flex justify-between mt-2">
+                <button className="text-white/50 hover:text-white text-[11px]">Review Security</button>
+                <button
+                  onClick={() => setPublished(true)}
+                  className="bg-blue-600 text-white text-[11px] px-3 py-[3px] rounded"
+                >
+                  {published ? 'Update' : 'Publish'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+const TypingText = ({ text = 'Writing..', speed = 100, trigger }) => {
+  const [displayed, setDisplayed] = useState('');
+  useEffect(() => {
+    setDisplayed('');
+    let i = 0;
+    const interval = setInterval(() => {
+      setDisplayed(text.slice(0, i + 1));
+      i++;
+      if (i > text.length) clearInterval(interval);
+    }, speed);
+    return () => clearInterval(interval);
+  }, [trigger]);
+  return <span className="text-xs text-blue-300">{displayed}</span>;
+};
+interface CardProps {
+  file: string;
+  preview: string | null;
+  onPreview: () => Promise<void> | void;
+  onCode: () => void;
+}
+function Card({ file, preview, onPreview, onCode }: CardProps) {
+  const fileName = file.split('/').pop();
+  const [status, setStatus] = useState<'typing' | 'ready'>(preview ? 'ready' : 'typing');
+  const [typingTrigger, setTypingTrigger] = useState(Date.now());
+
+  useEffect(() => {
+    setStatus('typing');
+    setTypingTrigger(Date.now());
+  }, [file]);
+
+  useEffect(() => {
+    // mark ready when preview URL is available
+    if (preview) {
+      setStatus('ready');
+    }
+  }, [preview]);
+
+  const handlePreview = async () => {
+    await onPreview();
+  };
+  return (
+    <div
+  onClick={handlePreview}
+  className={`relative mt-2 ml-2 w-[300px] rounded-lg p-[2px] cursor-pointer ${
+    status === 'typing'
+      ? 'bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 animate-flow-border'
+      : 'bg-gray-700'
+  }`}
+>
+  <div className="rounded-lg bg-[#1a1a1a] p-3 shadow-sm hover:shadow-md transition-shadow duration-200">
+    {/* Top row */}
+    <div className="flex items-center">
+      <Globe size={16} className="text-white/70" />
+      <span className="ml-2 flex-1 truncate">
+        {status === 'typing' ? (
+          <span className="flex items-center space-x-1">
+            <TypingText text="Writing…" speed={100} trigger={typingTrigger} />
+            <span className="text-sm font-medium text-white truncate">{fileName}</span>
+          </span>
+        ) : (
+          <span className="text-sm font-medium text-green-400 truncate">Preview Ready</span>
+        )}
+      </span>
+      <ChevronRight size={16} className="text-white/50" />
+      <Bookmark size={16} className="ml-2 text-white/50 hover:text-white transition" />
+    </div>
+
+    {/* Bottom row */}
+    <div className="mt-3 flex space-x-2">
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onPreview();
+        }}
+        className="flex items-center gap-1 rounded-full bg-[#2a2a2a] px-3 py-1 text-xs text-white hover:bg-[#333] transition"
+      >
+        {status === 'typing' ? (
+          <Loader2 size={12} className="text-white/50 animate-spin" />
+        ) : (
+          <CheckCircle size={12} className="text-green-400" />
+        )}
+        <span>{status === 'typing' ? 'Loading' : 'Preview'}</span>
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onCode();
+        }}
+        className="flex items-center gap-1 rounded-full bg-[#2a2a2a] px-3 py-1 text-xs text-white hover:bg-[#333] transition"
+      >
+        <CodeIcon size={12} />
+        <span>Code</span>
+      </button>
+    </div>
+  </div>
+</div>
+  );
+}
+type BarProps = {
+  onExit: () => void;
+  onRaw?: () => void;
+  onDiff?: () => void;
+};
+const Bar = ({ onExit, onRaw, onDiff }: BarProps) => (
+  <div className="flex h-8 items-center justify-between border-b border-white/10 bg-[#111] px-4 text-[11px]">
+    <div className="flex gap-3 items-center">
+      <button onClick={onExit} type="button" className="text-[11px] px-2 py-1 font-medium text-white focus:outline-none rounded 
+                   hover:bg-white hover:text-blue-700 hover:border hover:border-gray-200 
+                   dark:hover:bg-gray-800 dark:hover:text-white dark:hover:border-gray-600" > ‹ Exit <span className="opacity-60">ESC</span></button>
+    </div>
+    <div className="flex gap-3">
+      <button onClick={onRaw} className="opacity-60 hover:text-white focus:outline-none" > Raw </button>
+      <button onClick={onDiff} className="opacity-60 hover:text-white focus:outline-none"> Diff </button>
+    </div>
+  </div>
+);
+export const Stack = ({ files, order, onExit, onRaw, onDiff }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.scrollTo({ top: ref.current.scrollHeight });
+  }, [files]);
+  const [openPaths, setOpenPaths] = useState<Record<string, boolean>>({});
+  const togglePath = (path: string) => {
+    setOpenPaths(prev => ({ ...prev, [path]: !(prev[path] ?? true) }));
+  };
+  const isFile = (path: string) => !path.endsWith('/');
+  return (
+    <div
+      ref={ref}
+      className="flex-1 overflow-y-auto bg-[#0a0a0a] font-mono text-[12px] text-slate-300"
+    >
+      <Bar onExit={onExit} onRaw={onRaw} onDiff={onDiff} />
+      {order.map(path => {
+        const isOpen = openPaths[path] ?? true;
+        return (
+          <div key={path}>
+            <div
+              onClick={() => togglePath(path)}
+              className="flex items-center justify-between px-6 py-2 bg-[#0a0a0a] border-b border-white/10 cursor-pointer hover:bg-[#161b22]"
+            >
+              <div className="flex items-center gap-2 truncate">
+                {isFile(path)
+                  ? <File size={16} className="text-green-400 flex-shrink-0" />
+                  : <Folder size={16} className="text-yellow-400 flex-shrink-0" />
+                }
+                <span className="truncate font-medium text-white">{path}</span>
+              </div>
+              {isOpen
+                ? <ChevronDown size={14} className="text-white/60" />
+                : <ArrowRight size={14} className="text-white/60" />
+              }
+            </div>
+
+            {isOpen && (
+              <div className="px-6 bg-[#0d1117]">
+                <SyntaxHighlighter
+                  language={langFromPath(path)}
+                  style={vscDarkPlus}
+                  customStyle={{
+                    margin: 0,
+                    padding: '12px 16px',
+                    background: 'transparent',
+                    fontSize: '12px',
+                    lineHeight: '1.5',
+                  }}
+                  codeTagProps={{ style: { fontFamily: 'inherit', fontSize: '12px', whiteSpace: 'pre' } }}
+                  showLineNumbers
+                >
+                  {files[path]?.replace(/\r\n/g, '\n').replace(/^\n+/, '')}
+                </SyntaxHighlighter>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+const Explorer = ({ files, order, sel, setSel, extTree, setExtTree, setFiles, explorer, uuid, USER_ID }) => {
+  const [query, setQuery] = useState('');
+  const [loadingTree, setLoadingTree] = useState(false);
+  const [hasShownError, setHasShownError] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (!explorer) return;
+    setLoadingTree(true);
+    setError('');
+    setHasShownError(false);
+    const fetchTree = async () => {
+      try {
+        const res = await fetch(`http://golang.n8n-wsk.com:9191/api/project-structure?user_id=${USER_ID}&uuid=${uuid}`);
+        let data;
+        const text = await res.text(); // Get raw text first
+        try {
+          data = JSON.parse(text); // Try parsing JSON
+        } catch (jsonErr) {
+          throw new Error(text); // If not JSON, just show text as error
+        }
+        if (!res.ok) {
+          throw new Error(data?.message || 'Unknown error occurred');
+        }
+        setExtTree(data);
+        setError('');
+      } catch (err) {
+        if (!hasShownError) {
+          setError(err.message || 'Error loading folder structure');
+          setHasShownError(true);
+        }
+        setExtTree(null);
+      } finally {
+        setLoadingTree(false);
+      }
+    };
+  
+    fetchTree();
+  }, [explorer, uuid]);  
+  useEffect(() => {
+    if (!sel || !extTree) return;
+    const content = getExtContentByPath(extTree, sel);
+    if (content) {
+      setFiles((prev) => ({ ...prev, [sel]: content }));
+    }
+  }, [sel, extTree]);
+  const buildTree = () => {
+    const root = {};
+    order.forEach((p) => {
+      const parts = p.split('/');
+      let current = root;
+
+      parts.forEach((seg, i) => {
+        if (!current[seg]) {
+          current[seg] = {
+            name: seg,
+            isDir: i < parts.length - 1,
+          };
+          if (i < parts.length - 1) {
+            current[seg].children = {};
+          }
+        }
+        if (i === parts.length - 1) {
+          current[seg].path = p;
+        }
+        current = current[seg].children || {};
+      });
+    });
+    return root;
+  };
+  const filterTree = (node) => {
+    if (!query.trim()) return node;
+    const out = {};
+    for (const n of Object.values(node)) {
+      if (
+        n.name.toLowerCase().includes(query.toLowerCase()) ||
+        n.path?.toLowerCase().includes(query.toLowerCase())
+      ) {
+        out[n.name] = n;
+      } else if (n.children) {
+        const c = filterTree(n.children);
+        if (Object.keys(c).length) out[n.name] = { ...n, children: c };
+      }
+    }
+    return out;
+  };
+  const filterExternalTree = (node) => {
+    if (!node) return null;
+    const matches = node.name.toLowerCase().includes(query.toLowerCase());
+    const filteredChildren = (node.children || [])
+      .map((child) => filterExternalTree(child))
+      .filter(Boolean);
+    if (matches || filteredChildren.length > 0) {
+      return { ...node, children: filteredChildren };
+    }
+    return null;
+  };
+  const tree = extTree ? filterExternalTree(extTree) : filterTree(buildTree());
+  return (
+    <div className="w-64 flex flex-col border-r border-white/10 bg-[#0a0a0a]">
+      <div className="flex h-9 items-center gap-2 border-b border-white/10 px-2 py-1">
+        <Search size={12} className="opacity-60" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search files…"
+          className="flex-1 bg-transparent text-[11px] outline-none placeholder:opacity-40"
+        />
+      </div>
+      {error && (
+        <div className="text-red-400 text-xs px-2 py-2 border-b border-white/10 bg-[#1a1a1a]">
+          {error}
+        </div>
+      )}
+      {loadingTree ? (
+        <div className="flex flex-1 items-center justify-center text-xs text-gray-400 py-4">
+          <Loader2 className="animate-spin mr-2" size={14} />
+          Loading folder structure…
+        </div>
+      ) : (
+        tree && <Rail tree={tree} sel={sel} setSel={setSel} isExternal={!!extTree} parentPath="" />
+      )}
+    </div>
+  );
+};
+const getExtContentByPath = (tree, path) => {
+  if (!tree) return '';
+  if (!tree.isDir && path.endsWith(tree.name)) {
+    return tree.content;
+  }
+  for (const child of tree.children || []) {
+    const result = getExtContentByPath(child, path);
+    if (result !== '') return result;
+  }
+  return '';
+};
+const Rail = ({ tree, sel, setSel, isExternal, parentPath }) => {
+  const [open, setOpen] = useState({});
+  const children = isExternal
+    ? Array.isArray(tree?.children) ? tree.children : []
+    : Object.values(tree || {});
+  return (
+    <div className="overflow-y-auto text-[12px]">
+      {children
+        .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+        .map((node, index) => {
+          const fullPath = node.path && node.path !== '/'
+            ? node.path
+            : `${parentPath}${parentPath ? '/' : ''}${node.name}`;
+
+          const key = `${fullPath}-${index}`;
+          const hasChildren = Array.isArray(node.children)
+            ? node.children.length > 0
+            : typeof node.children === 'object' && Object.keys(node.children).length > 0;
+          const isOpen = open[key];
+
+          return (
+            <Fragment key={key}>
+              <div
+                className={`flex cursor-pointer items-center gap-1 px-2 py-1 hover:bg-[#141414] ${
+                  fullPath === sel ? 'bg-[#1e1e1e] text-blue-300' : ''
+                }`}
+                onClick={() => {
+                  if (hasChildren) {
+                    setOpen((prev) => ({ ...prev, [key]: !isOpen }));
+                  } else {
+                    console.log("✅ Selected file:", fullPath);
+                    setSel(fullPath);
+                  }
+                }}
+                style={{ paddingLeft: `${12 + (parentPath.split('/').length - 1) * 12}px` }}
+              >
+                {hasChildren ? (
+                  isOpen ? <ChevronDown size={10} /> : <ArrowRight size={10} />
+                ) : (
+                  <span className="w-[10px]" />
+                )}
+
+                {hasChildren ? (
+                  isOpen
+                    ? <FolderOpen size={12} className="text-yellow-400" />
+                    : <Folder size={12} className="text-yellow-400" />
+                ) : (
+                  <File size={12} className="text-white/50" />
+                )}
+
+                <span className="truncate">{node.name}</span>
+              </div>
+
+              {hasChildren && isOpen && (
+                <Rail
+                  tree={node}
+                  sel={sel}
+                  setSel={setSel}
+                  isExternal={isExternal}
+                  parentPath={fullPath}
+                />
+              )}
+            </Fragment>
+          );
+        })}
+    </div>
+  );
+};
+//demo completed file with reload history
+
