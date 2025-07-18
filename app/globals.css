@@ -81,3 +81,7 @@ body {
   animation: flow-border 4s linear infinite;
   background-size: 200% 200%;
 }
+.resizable-aside {
+  resize: horizontal;
+  overflow: auto;
+}
