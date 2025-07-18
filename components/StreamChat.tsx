@@ -16,8 +16,8 @@ const USER_ID = 'demo-user-001';
 const BRAND = 'GravityDoc';
 const LOGO = '/gravitywrite.svg';
 
-export default function StreamChat() {
-  const { uuid } = useParams<{ uuid: string }>();
+export default function StreamChat({ uuid }: { uuid: string }) {
+  // const { uuid } = useParams<{ uuid: string }>();
   const [published, setPublished] = useState(false);
   const [log, setLog] = useState<any[]>([]);
   const [draft, setDraft] = useState<string | null>(null);

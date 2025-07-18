@@ -75,14 +75,7 @@ export default function Home() {
      //console.log("stored item from session storage",storeditem)
     router.push(`/instances/${id}`);
   };
-  // const send = () => {
-  //   if (!input.trim()) return;
-  //   const id = uuidv4();
-  //   sessionStorage.setItem(`prompt-${id}`, input);
-  //   localStorage.setItem(`userPrompt-${id}`, input);
-  //   router.push(`/stream-chat/instances/${id}`);
-  // };
-  
+
   const attach = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     if (!f) return;
