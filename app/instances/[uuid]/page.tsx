@@ -1,6 +1,12 @@
 import StreamChat from '@/components/StreamChat';
 
-export default function InstancePage({ params }: { params: { uuid: string } }) {
+interface PageProps {
+  params: {
+    uuid: string;
+  };
+}
+
+export default function Page({ params }: PageProps) {
   return (
     <div className="bg-[#0b0b0b] text-white min-h-screen flex flex-col">
       <StreamChat uuid={params.uuid} />
